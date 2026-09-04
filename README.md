@@ -10,6 +10,150 @@ https://github.com/jackthony/sensor-politico-auditoria-dev
 
 El archivo `.env` real está excluido por `.gitignore`. El repositorio contiene solamente el arnés de auditoría, ejemplos de configuración y un simulador local.
 
+## 1. Objetivo remoto auditado
+
+Página revisada:
+
+```text
+https://sensor-politico.pages.dev/lima/lima/san-martin-de-porres/?tipo=district&ubigeo=150135#resultados
+```
+
+Parámetros observados:
+
+```text
+tipo=district
+ubigeo=150135
+```
+
+La aplicación está servida desde Cloudflare Pages y usa Supabase como backend. La encuesta revisada es:
+
+```text
+poll_id: 3e6a63a4-3494-46e4-9b92-374df51d580e
+name: Sondeo Distrital de San Martin De Porres
+geo_id: 37
+status: active
+```
+
+El candidato usado para verificar el flujo fue:
+
+```text
+candidate_id: 3487f0a9-c231-414e-8b11-69822b32f67a
+full_name: DIEGO ARMANDO LOPEZ JARA
+territory_ubigeo: 150135
+display_order: 19
+active_in_poll: true
+```
+
+## 2. Assets y configuración del frontend
+
+Assets observados durante la revisión:
+
+```text
+/assets/config.js?v=45
+/assets/public-v13.js?v=81
+/assets/public-v77.js?v=77
+```
+
+La configuración pública contiene la URL de Supabase y una clave `sb_publishable`. Esa clave identifica al cliente público; no es una clave `service_role`.
+
+El flujo del navegador genera o recupera `localStorage.sensor_device`, usa `crypto.randomUUID()` cuando necesita crear el valor inicial y calcula un SHA-256 a partir del dispositivo y una semilla local. El resultado se envía como `p_voter_hash`; no hay evidencia en el bundle de una identidad autenticada, un nonce server-side, una sesión obligatoria, una IP enviada desde el frontend o un CAPTCHA integrado en ese flujo.
+
+## 3. Interfaces Supabase observadas
+
+### Votación
+
+```text
+POST /rest/v1/rpc/submit_scope_vote_v41
+```
+
+Parámetros observados en el cliente:
+
+```text
+p_poll_id
+p_candidate_id
+p_voter_hash
+```
+
+El RPC devolvió `VOTE_REGISTERED` para un hash sintético de 64 caracteres durante la prueba anterior y el contador aumentó. La tabla `public.votes` no devolvió filas al rol anónimo durante la lectura; eso no permite concluir si existe o no permiso de `INSERT` directo.
+
+### Resultados
+
+```text
+POST /rest/v1/rpc/get_poll_results
+```
+
+Devuelve resultados agregados por candidato. En la última lectura el total fue 10 y Diego tenía 3.
+
+### Analítica
+
+```text
+POST /rest/v1/rpc/record_analytics_event_v77
+POST /rest/v1/rpc/record_site_visit
+```
+
+El frontend usa `sessionStorage.sensor_analytics_session_v77` y envía hashes de visitante/sesión, página, geografía, encuesta, candidato y fuente. No se observó envío de IP en el código cliente.
+
+### Administración
+
+```text
+/admin/
+admin_traffic_dashboard_v77
+admin_profiles
+```
+
+El shell administrativo es descargable sin autenticación. La comprobación de sesión/rol se ejecuta posteriormente. Una llamada al RPC administrativo sin sesión devolvió `AUTH_REQUIRED` con HTTP 400.
+
+## 4. Inventario visible para `anon`
+
+Conteos observados mediante REST con la clave pública:
+
+```text
+geo_units:                  100
+political_organizations:     69
+candidates:                1184
+polls:                      133
+poll_candidates:           1758
+candidate_import_scopes:    100
+candidate_profiles:           0
+service_requests:             0
+site_visits:                  0
+candidate_photos:             0
+coverage_requests_v45:        0
+votes:                        0 filas visibles
+```
+
+`candidates` expone, entre otros, `source_payload`, `source_candidate_uid`, `source_name`, `last_synced_at`, `source_active` y `source_removed_at`. `candidate_import_scopes` expone `source_url`, estado y notas de sincronización.
+
+## 5. Observaciones de despliegue
+
+```text
+/.well-known/security.txt → fallback HTML de la página principal
+Cloudflare Pages           → HSTS no observado
+Supabase                   → HSTS observado
+@supabase/supabase-js@2    → versión no fijada en el bundle
+```
+
+No se encontró una clave maestra, `service_role`, JWT privado, secreto OAuth ni evidencia pública del nombre del creador de la cuenta.
+
+## 6. Estructura del arnés local
+
+```text
+audit-dev.mjs
+  loadDotEnv()             carga .env
+  request()                realiza REST/RPC con la clave pública
+  rest()                   consultas REST de lectura
+  rpc()                    llamadas RPC
+  currentStateFor()        encuesta, candidato, relación y resultados
+  readOnlyAudit()          inventario y probes sin escritura
+  oneVote()                una escritura, solo poll [QA]
+  qaTwoIdentities()        dos hashes QA, en serie
+
+simulate-vote-flow.mjs
+  simulación en memoria; no usa fetch ni Supabase
+```
+
+`audit-dev.mjs:86-90` implementa la solicitud RPC genérica. `audit-dev.mjs:178-182` contiene la llamada controlada de un voto QA. `audit-dev.mjs:221-230` contiene las dos llamadas secuenciales del escenario QA.
+
 ## Hallazgo técnico confirmado
 
 El frontend invoca el RPC `submit_scope_vote_v41` con tres valores controlados por el cliente:
@@ -47,12 +191,12 @@ El mapeo definitivo debe confirmarse después de revisar el cuerpo de `submit_sc
 
 1. Conteo antes de la prueba.
 2. Nombre y firma del RPC invocado.
-3. Solicitud y respuesta redactedas, sin publicar secretos.
+3. Solicitud y respuesta redactadas, sin publicar secretos.
 4. Conteo después de dos identidades sintéticas.
 5. Definición SQL de la función y sus permisos.
 6. Policies RLS y constraints de `public.votes`.
 
-Un resultado `delta: 2` en el modo QA demuestra que dos identidades elegidas por el cliente fueron tratadas como dos votantes. No es necesario enviar 10 000 solicitudes para demostrar el defecto; hacerlo contaminaría los datos y no aporta evidencia adicional sobre la causa.
+El modo QA reporta `beforeTotalVotes`, las respuestas de ambas llamadas, `afterTotalVotes` y `delta`. Un `delta: 2` demuestra que dos identidades elegidas por el cliente fueron tratadas como dos votantes.
 
 ## Corrección recomendada
 
