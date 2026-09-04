@@ -5,6 +5,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { createTimingProfile, statistics } from './timing-profile.mjs';
+
+const DEFAULT_TOTAL_ACCIONES = 50;
+const DEFAULT_MEDIA_MS = 12_000;
+const DEFAULT_JITTER_PERCENT = 30;
+const DEFAULT_MIN_INTERVALO_MS = 1_000;
+const DEFAULT_SEMILLA = 'clase-jitter-normal-001';
 
 function loadDotEnv(file = '.env') {
   if (!fs.existsSync(file)) return;
@@ -36,8 +43,11 @@ const candidateId = process.env.CANDIDATE_ID || '';
 const testRunId = process.env.TEST_RUN_ID || '';
 const voteRpcName = process.env.VOTE_RPC_NAME || 'submit_scope_vote_v41';
 const resultsRpcName = process.env.RESULTS_RPC_NAME || 'get_poll_results';
-const totalAcciones = readNonNegativeInteger('TOTAL_ACCIONES', 50);
-const intervaloMs = readNonNegativeInteger('INTERVALO_MS', 12_000);
+const totalAcciones = readNonNegativeInteger('TOTAL_ACCIONES', DEFAULT_TOTAL_ACCIONES);
+const mediaMs = readTimingNumber('MEDIA_MS', 'INTERVALO_MS', DEFAULT_MEDIA_MS);
+const jitterPercent = readNonNegativeNumber('JITTER_PERCENT', DEFAULT_JITTER_PERCENT);
+const minIntervaloMs = readNonNegativeNumber('MIN_INTERVALO_MS', DEFAULT_MIN_INTERVALO_MS);
+const semilla = process.env.SEMILLA || DEFAULT_SEMILLA;
 
 function readNonNegativeInteger(name, fallback) {
   const rawValue = process.env[name];
@@ -48,6 +58,25 @@ function readNonNegativeInteger(name, fallback) {
     throw new Error(`${name} debe ser un entero mayor o igual a 0.`);
   }
   return value;
+}
+
+function readNonNegativeNumber(name, fallback) {
+  const rawValue = process.env[name];
+  if (rawValue === undefined || rawValue === '') return fallback;
+
+  const value = Number(rawValue);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${name} debe ser un número mayor o igual a 0.`);
+  }
+  return value;
+}
+
+function readTimingNumber(name, legacyName, fallback) {
+  if (process.env[name] !== undefined && process.env[name] !== '') {
+    return readNonNegativeNumber(name, fallback);
+  }
+
+  return readNonNegativeNumber(legacyName, fallback);
 }
 
 const esperar = (milisegundos) => new Promise(resolve => setTimeout(resolve, milisegundos));
@@ -126,31 +155,61 @@ async function ejecutarFuncion(iteracion) {
 async function probarAccionesEspaciadas() {
   requireConfig();
 
+  const intervalosMs = createTimingProfile({
+    totalAcciones,
+    mediaMs,
+    jitterPercent,
+    minIntervaloMs,
+    semilla
+  });
+
   const beforeTotalVotes = await totalDeResultados();
   const responses = [];
+  const timestamps = [];
 
   console.log(
     `Iniciando prueba de desarrollo: ${totalAcciones} acciones contra ${voteRpcName}, ` +
-    `espaciadas cada ${intervaloMs / 1000} segundos.`
+    `con media objetivo de ${mediaMs / 1000} segundos y jitter de ${jitterPercent}%.`
   );
 
+  console.log(JSON.stringify({
+    timing: {
+      distribucion: 'lognormal',
+      mediaObjetivoMs: mediaMs,
+      jitterObjetivoPercent: jitterPercent,
+      minimoMs: minIntervaloMs,
+      semilla,
+      intervalos: statistics(intervalosMs)
+    }
+  }, null, 2));
+
   for (let i = 1; i <= totalAcciones; i += 1) {
+    if (i > 1) await esperar(intervalosMs[i - 2]);
+
     console.log(`[${new Date().toLocaleTimeString()}] Ejecutando iteración #${i}...`);
 
+    const startedAt = Date.now();
+    timestamps.push(startedAt);
     const result = await ejecutarFuncion(i);
+    const finishedAt = Date.now();
     responses.push({ sequence: i, status: result.status, data: result.data });
-    console.log(JSON.stringify({ sequence: i, status: result.status, response: result.data }));
+    console.log(JSON.stringify({
+      sequence: i,
+      status: result.status,
+      requestDurationMs: finishedAt - startedAt,
+      response: result.data
+    }));
 
     // Evita repetir llamadas si el endpoint ya respondió con error.
     if (result.status >= 400) {
       throw new Error(`La iteración #${i} falló; se detiene la prueba para no repetir el error.`);
     }
 
-    if (i < totalAcciones) await esperar(intervaloMs);
   }
 
   const afterTotalVotes = await totalDeResultados();
   const successfulRequests = responses.filter(result => result.status >= 200 && result.status < 300).length;
+  const observedIntervals = timestamps.slice(1).map((value, index) => value - timestamps[index]);
 
   console.log(JSON.stringify({
     target: {
@@ -165,7 +224,10 @@ async function probarAccionesEspaciadas() {
     delta: afterTotalVotes - beforeTotalVotes,
     successfulRequests,
     requestedActions: totalAcciones,
-    intervaloMs,
+    timing: {
+      configuredIntervals: statistics(intervalosMs),
+      observedIntervals: statistics(observedIntervals)
+    },
     message: 'Prueba completada contra la instancia marcada como development.'
   }, null, 2));
 }

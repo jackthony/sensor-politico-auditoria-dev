@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash } from 'node:crypto';
+import { createTimingProfile, statistics } from './timing-profile.mjs';
 
 const DEFAULT_TOTAL_ACCIONES = 50;
 const DEFAULT_MEDIA_MS = 12_000;
@@ -55,63 +55,6 @@ function readNonNegativeNumber(name, fallback) {
     throw new Error(`${name} debe ser un número mayor o igual a 0.`);
   }
   return value;
-}
-
-function createSeededRandom(seed) {
-  let state = createHash('sha256').update(seed).digest().readUInt32BE(0);
-
-  return () => {
-    state = (1664525 * state + 1013904223) >>> 0;
-    return state / 2 ** 32;
-  };
-}
-
-function standardNormalRandom(random) {
-  // Box-Muller transforma dos variables uniformes en una normal estándar.
-  const u1 = Math.max(random(), Number.EPSILON);
-  const u2 = random();
-  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-}
-
-function mean(values) {
-  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
-}
-
-function sampleVariance(values) {
-  if (values.length < 2) return 0;
-  const average = mean(values);
-  return values.reduce((sum, value) => sum + (value - average) ** 2, 0) / (values.length - 1);
-}
-
-function statistics(values) {
-  const average = mean(values);
-  const variance = sampleVariance(values);
-  const standardDeviation = Math.sqrt(variance);
-
-  return {
-    count: values.length,
-    meanMs: average,
-    varianceMs2: variance,
-    standardDeviationMs: standardDeviation,
-    jitterPercent: average ? (standardDeviation / average) * 100 : 0
-  };
-}
-
-function createTimingProfile({ totalAcciones, mediaMs, jitterPercent, minIntervaloMs, semilla }) {
-  const intervalCount = Math.max(totalAcciones - 1, 0);
-  if (!intervalCount) return [];
-
-  const random = createSeededRandom(semilla);
-  const coefficientOfVariation = jitterPercent / 100;
-  const logVariance = Math.log(1 + coefficientOfVariation ** 2);
-  const logStandardDeviation = Math.sqrt(logVariance);
-  const logMean = Math.log(mediaMs) - logVariance / 2;
-
-  return Array.from({ length: intervalCount }, () => {
-    const standardNormal = standardNormalRandom(random);
-    const lognormalValue = Math.exp(logMean + logStandardDeviation * standardNormal);
-    return Math.max(minIntervaloMs, Math.round(lognormalValue));
-  });
 }
 
 const esperar = milisegundos => new Promise(resolve => setTimeout(resolve, milisegundos));
