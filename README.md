@@ -10,8 +10,6 @@ https://github.com/jackthony/sensor-politico-auditoria-dev
 
 El archivo `.env` real está excluido por `.gitignore`. El repositorio contiene solamente el arnés de auditoría, ejemplos de configuración y un simulador local.
 
-Este proyecto no incluye automatización para falsear resultados, suplantar personas, rotar IPs, ocultar identidades ni emitir miles de votos. La prueba controlada de dos identidades es suficiente para demostrar la falla de integridad sin contaminar el sondeo público.
-
 ## Hallazgo técnico confirmado
 
 El frontend invoca el RPC `submit_scope_vote_v41` con tres valores controlados por el cliente:
