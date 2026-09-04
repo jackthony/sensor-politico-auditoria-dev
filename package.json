@@ -1,8 +1,9 @@
 {
-  "name": "sensor-politico-auditoria-dev",
+  "name": "supabase-dev-spaced-tests",
   "private": true,
   "type": "module",
   "scripts": {
-    "audit:dev": "node audit-dev.mjs"
+    "test:dev": "node test-dev.mjs",
+    "timing:qa": "node timing-profile-qa.mjs"
   }
 }
