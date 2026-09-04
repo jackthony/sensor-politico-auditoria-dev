@@ -1,0 +1,8 @@
+{
+  "name": "sensor-politico-auditoria-dev",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "audit:dev": "node audit-dev.mjs"
+  }
+}
